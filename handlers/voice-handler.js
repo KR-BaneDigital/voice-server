@@ -14,12 +14,12 @@ function handleVoiceWebhook(req, res) {
     const host = process.env.VOICE_SERVER_URL || req.get('host');
     const protocol = host.includes('localhost') ? 'ws' : 'wss';
 
-    // Return TwiML with Stream directive
+    // Return TwiML with Stream directive pointing to /media-stream path
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Please wait while I connect you to our AI assistant.</Say>
   <Connect>
-    <Stream url="${protocol}://${host}">
+    <Stream url="${protocol}://${host}/media-stream">
       <Parameter name="callSid" value="${callSid}" />
       <Parameter name="from" value="${from}" />
       <Parameter name="to" value="${to}" />
