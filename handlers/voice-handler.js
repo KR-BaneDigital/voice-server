@@ -52,6 +52,8 @@ function handleVoiceStream(twilioWs, initialCallSid) {
   let openaiClient = null;
   let callSid = initialCallSid;
   let streamSid = null;
+  let audioPacketCount = 0;
+  let audioSentCount = 0;
 
   twilioWs.on('message', async (message) => {
     try {
@@ -90,6 +92,7 @@ Ask clarifying questions when needed and be professional.`;
                 case 'response.audio.delta':
                   // Stream audio back to Twilio
                   if (streamSid && twilioWs.readyState === 1) { // 1 = OPEN
+                    audioSentCount++;
                     twilioWs.send(JSON.stringify({
                       event: 'media',
                       streamSid: streamSid,
@@ -97,6 +100,11 @@ Ask clarifying questions when needed and be professional.`;
                         payload: msg.delta
                       }
                     }));
+                    
+                    // Log every 50 audio packets sent
+                    if (audioSentCount % 50 === 0) {
+                      console.log(`[Voice Stream] ✅ Sent ${audioSentCount} audio packets to Twilio (AI is speaking)`);
+                    }
                   }
                   break;
 
@@ -125,14 +133,16 @@ Ask clarifying questions when needed and be professional.`;
           break;
 
         case 'media':
-          // Forward audio to OpenAI
-          console.log('[Voice Stream] Received media from Twilio, payload size:', data.media?.payload?.length || 0);
+          // Forward audio to OpenAI (count packets, log every 100)
+          audioPacketCount++;
           if (openaiClient && data.media?.payload) {
             const audioBuffer = Buffer.from(data.media.payload, 'base64');
-            console.log('[Voice Stream] Forwarding audio to OpenAI, buffer size:', audioBuffer.length);
             openaiClient.sendAudio(audioBuffer);
-          } else {
-            console.log('[Voice Stream] Skipping media - openaiClient:', !!openaiClient, 'payload:', !!data.media?.payload);
+            
+            // Log every 100 packets
+            if (audioPacketCount % 100 === 0) {
+              console.log(`[Voice Stream] Audio: received ${audioPacketCount} packets from Twilio, sent ${audioSentCount} packets to Twilio`);
+            }
           }
           break;
 
