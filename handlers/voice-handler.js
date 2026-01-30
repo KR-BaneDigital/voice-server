@@ -84,6 +84,7 @@ Ask clarifying questions when needed and be professional.`;
 
           // Handle OpenAI messages
           openaiClient.onMessage(async (msg) => {
+            console.log('[OpenAI] Received message type:', msg.type); // LOG ALL MESSAGE TYPES
             try {
               switch (msg.type) {
                 case 'response.audio.delta':
@@ -125,9 +126,13 @@ Ask clarifying questions when needed and be professional.`;
 
         case 'media':
           // Forward audio to OpenAI
+          console.log('[Voice Stream] Received media from Twilio, payload size:', data.media?.payload?.length || 0);
           if (openaiClient && data.media?.payload) {
             const audioBuffer = Buffer.from(data.media.payload, 'base64');
+            console.log('[Voice Stream] Forwarding audio to OpenAI, buffer size:', audioBuffer.length);
             openaiClient.sendAudio(audioBuffer);
+          } else {
+            console.log('[Voice Stream] Skipping media - openaiClient:', !!openaiClient, 'payload:', !!data.media?.payload);
           }
           break;
 
