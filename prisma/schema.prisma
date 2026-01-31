@@ -1,0 +1,117 @@
+// Voice Server Prisma Schema - ONLY includes models needed for voice AI
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// PHONE NUMBERS
+// ============================================================================
+
+model PhoneNumber {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agencyId     String   @map("agency_id") @db.Uuid
+  phoneNumber  String   @unique @map("phone_number") @db.VarChar(20)
+  friendlyName String?  @map("friendly_name") @db.VarChar(255)
+  status       String   @default("active") @db.VarChar(20)
+  
+  agents       AiAgent[]
+  
+  @@map("phone_numbers")
+}
+
+// ============================================================================
+// AI AGENTS
+// ============================================================================
+
+model AiAgent {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agencyId      String   @map("agency_id") @db.Uuid
+  name          String   @db.VarChar(255)
+  status        String   @default("active") @db.VarChar(20)
+  systemPrompt  String?  @map("system_prompt") @db.Text
+  phoneNumberId String?  @map("phone_number_id") @db.Uuid
+  voice         String?  @db.VarChar(50)
+  
+  phoneNumber    PhoneNumber?           @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
+  conversations  Conversation[]
+  knowledgeBases AgentKnowledgeBase[]
+  
+  @@map("ai_agents")
+}
+
+// ============================================================================
+// KNOWLEDGE BASE
+// ============================================================================
+
+model KnowledgeBase {
+  id       String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agencyId String   @map("agency_id") @db.Uuid
+  name     String
+  
+  documents KnowledgeDocument[]
+  agents    AgentKnowledgeBase[]
+  
+  @@map("knowledge_bases")
+}
+
+model KnowledgeDocument {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  knowledgeBaseId String   @map("knowledge_base_id") @db.Uuid
+  name            String
+  status          String
+  content         String?  @db.Text
+  
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  
+  @@map("knowledge_documents")
+}
+
+model AgentKnowledgeBase {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  aiAgentId       String   @map("ai_agent_id") @db.Uuid
+  knowledgeBaseId String   @map("knowledge_base_id") @db.Uuid
+  
+  aiAgent         AiAgent       @relation(fields: [aiAgentId], references: [id], onDelete: Cascade)
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  
+  @@unique([aiAgentId, knowledgeBaseId])
+  @@map("agent_knowledge_bases")
+}
+
+// ============================================================================
+// CONVERSATIONS
+// ============================================================================
+
+model Conversation {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agencyId    String    @map("agency_id") @db.Uuid
+  aiAgentId   String?   @map("ai_agent_id") @db.Uuid
+  contactPhone String?  @map("contact_phone") @db.VarChar(20)
+  channel     String    @db.VarChar(20)
+  status      String    @default("active") @db.VarChar(20)
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz
+  
+  aiAgent     AiAgent?             @relation(fields: [aiAgentId], references: [id], onDelete: SetNull)
+  messages    ConversationMessage[]
+  
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  role           String   @db.VarChar(20)
+  content        String   @db.Text
+  sentAt         DateTime @default(now()) @map("sent_at") @db.Timestamptz
+  
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  @@map("conversation_messages")
+}
