@@ -1,4 +1,7 @@
-const { OpenAIRealtimeClient } = require('../lib/openai-realtime-client');
+const WebSocket = require('ws');
+const { PrismaClient } = require('@prisma/client');
+
+const prisma = new PrismaClient();
 
 /**
  * Handle incoming voice webhook from Twilio
@@ -14,7 +17,7 @@ function handleVoiceWebhook(req, res) {
     const host = process.env.VOICE_SERVER_URL || req.get('host');
     const protocol = host.includes('localhost') ? 'ws' : 'wss';
 
-    // Return TwiML with Stream directive pointing to /media-stream path (NO <Say> - AI will greet)
+    // Return TwiML with Stream directive (NO <Say> - AI will greet)
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -43,16 +46,16 @@ function handleVoiceWebhook(req, res) {
 
 /**
  * Handle WebSocket voice stream from Twilio
- * Bridges Twilio ↔ OpenAI Realtime API
+ * Uses Official OpenAI Pattern: Simple Relay (Twilio ↔ OpenAI)
  */
-function handleVoiceStream(twilioWs, initialCallSid) {
+async function handleVoiceStream(twilioWs, initialCallSid) {
   console.log('[Voice Stream] Client connected');
 
-  let openaiClient = null;
+  let openaiWs = null;
   let callSid = initialCallSid;
   let streamSid = null;
-  let audioPacketCount = 0;
-  let audioSentCount = 0;
+  let conversationId = null;
+  let agentId = null;
 
   twilioWs.on('message', async (message) => {
     try {
@@ -68,97 +71,211 @@ function handleVoiceStream(twilioWs, initialCallSid) {
           
           console.log('[Voice Stream] Call started:', { callSid, fromPhone, toPhone });
 
-          // System instructions for the AI
-          const instructions = `You are a helpful and friendly AI assistant. 
-Be concise in your responses since this is a phone conversation.
-Ask clarifying questions when needed and be professional.`;
-
-          // Initialize OpenAI Realtime
-          openaiClient = new OpenAIRealtimeClient({
-            model: 'gpt-4o-realtime-preview-2024-10-01',
-            voice: 'alloy',
-            instructions,
-            temperature: 0.8
+          // ========================================
+          // 1. LOOKUP AGENT FROM DATABASE
+          // ========================================
+          const agent = await prisma.aiAgent.findFirst({
+            where: {
+              phoneNumber: {
+                phoneNumber: toPhone
+              },
+              status: 'active'
+            },
+            include: {
+              knowledgeBases: {
+                include: {
+                  knowledgeBase: {
+                    include: {
+                      documents: {
+                        where: {
+                          status: 'active'
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           });
 
-          await openaiClient.connect();
+          if (!agent) {
+            console.error('[Voice Stream] No active agent found for phone:', toPhone);
+            twilioWs.close();
+            return;
+          }
 
-          // Handle OpenAI messages
-          openaiClient.onMessage(async (msg) => {
-            console.log('[OpenAI] Received message type:', msg.type); // LOG ALL MESSAGE TYPES
+          agentId = agent.id;
+          console.log('[Voice Stream] Agent found:', { agentId, name: agent.name });
+
+          // ========================================
+          // 2. BUILD KNOWLEDGE BASE CONTEXT
+          // ========================================
+          const knowledgeDocs = agent.knowledgeBases
+            .flatMap(kb => kb.knowledgeBase.documents)
+            .map(doc => `${doc.name}:\n${doc.content}`)
+            .join('\n\n---\n\n');
+
+          console.log('[Voice Stream] Loaded knowledge docs:', {
+            knowledgeBaseCount: agent.knowledgeBases.length,
+            documentCount: agent.knowledgeBases.flatMap(kb => kb.knowledgeBase.documents).length
+          });
+
+          // ========================================
+          // 3. BUILD SYSTEM INSTRUCTIONS
+          // ========================================
+          const instructions = `${agent.systemPrompt || 'You are a helpful AI assistant.'}
+
+${knowledgeDocs ? `KNOWLEDGE BASE:
+${knowledgeDocs}
+
+Use this knowledge base to accurately answer questions. If you don't know something, say so.` : ''}`;
+
+          // ========================================
+          // 4. CREATE CONVERSATION RECORD
+          // ========================================
+          const conversation = await prisma.aiConversation.create({
+            data: {
+              agentId: agent.id,
+              contactPhone: fromPhone,
+              channel: 'voice',
+              status: 'active'
+            }
+          });
+          conversationId = conversation.id;
+          console.log('[Voice Stream] Conversation created:', conversationId);
+
+          // ========================================
+          // 5. CONNECT TO OPENAI REALTIME API
+          // ========================================
+          openaiWs = new WebSocket(
+            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
+            {
+              headers: {
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'OpenAI-Beta': 'realtime=v1'
+              }
+            }
+          );
+
+          openaiWs.on('open', () => {
+            console.log('[OpenAI] Connected - configuring session');
+            
+            // Configure session with knowledge and voice
+            openaiWs.send(JSON.stringify({
+              type: 'session.update',
+              session: {
+                voice: agent.voice || 'alloy',
+                instructions: instructions,
+                input_audio_format: 'g711_ulaw',
+                output_audio_format: 'g711_ulaw',
+                input_audio_transcription: {
+                  model: 'whisper-1'
+                },
+                turn_detection: {
+                  type: 'server_vad',
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 500
+                }
+              }
+            }));
+            console.log('[OpenAI] Session configured - AI will greet automatically');
+          });
+
+          // ========================================
+          // 6. RELAY OPENAI → TWILIO (Audio + Transcripts)
+          // ========================================
+          openaiWs.on('message', async (msg) => {
             try {
-              switch (msg.type) {
-                case 'session.updated':
-                  // Session ready - make AI greet immediately
-                  console.log('[OpenAI] Session ready - triggering AI greeting');
-                  openaiClient.send({
-                    type: 'response.create'
+              const response = JSON.parse(msg.toString());
+
+              // Stream audio to Twilio
+              if (response.type === 'response.audio.delta' && response.delta) {
+                if (streamSid && twilioWs.readyState === 1) {
+                  twilioWs.send(JSON.stringify({
+                    event: 'media',
+                    streamSid: streamSid,
+                    media: {
+                      payload: response.delta
+                    }
+                  }));
+                }
+              }
+
+              // Save user message to database
+              if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                console.log('[Voice Stream] User said:', response.transcript);
+                
+                await prisma.aiConversationMessage.create({
+                  data: {
+                    conversationId: conversationId,
+                    role: 'user',
+                    content: response.transcript
+                  }
+                });
+              }
+
+              // Save AI message to database
+              if (response.type === 'response.done') {
+                const transcript = response.response?.output?.[0]?.content
+                  ?.find(c => c.transcript)?.transcript;
+
+                if (transcript) {
+                  console.log('[Voice Stream] AI said:', transcript);
+                  
+                  await prisma.aiConversationMessage.create({
+                    data: {
+                      conversationId: conversationId,
+                      role: 'assistant',
+                      content: transcript
+                    }
                   });
-                  break;
-
-                case 'response.audio.delta':
-                  // Stream audio back to Twilio
-                  if (streamSid && twilioWs.readyState === 1) { // 1 = OPEN
-                    audioSentCount++;
-                    twilioWs.send(JSON.stringify({
-                      event: 'media',
-                      streamSid: streamSid,
-                      media: {
-                        payload: msg.delta
-                      }
-                    }));
-                    
-                    // Log every 50 audio packets sent
-                    if (audioSentCount % 50 === 0) {
-                      console.log(`[Voice Stream] ✅ Sent ${audioSentCount} audio packets to Twilio (AI is speaking)`);
-                    }
-                  }
-                  break;
-
-                case 'conversation.item.input_audio_transcription.completed':
-                  console.log('[Voice Stream] User said:', msg.transcript);
-                  break;
-
-                case 'response.done':
-                  if (msg.response?.output?.[0]?.content) {
-                    const transcript = msg.response.output[0].content
-                      .filter(c => c.type === 'audio' && c.transcript)
-                      .map(c => c.transcript)
-                      .join(' ');
-
-                    if (transcript) {
-                      console.log('[Voice Stream] AI said:', transcript);
-                    }
-                  }
-                  break;
+                }
               }
             } catch (err) {
               console.error('[Voice Stream] Error handling OpenAI message:', err);
             }
           });
 
+          openaiWs.on('error', (error) => {
+            console.error('[OpenAI] WebSocket Error:', error);
+          });
+
+          openaiWs.on('close', () => {
+            console.log('[OpenAI] Disconnected');
+          });
+
           break;
 
         case 'media':
-          // Forward audio to OpenAI (count packets, log every 100)
-          audioPacketCount++;
-          if (openaiClient && data.media?.payload) {
-            const audioBuffer = Buffer.from(data.media.payload, 'base64');
-            openaiClient.sendAudio(audioBuffer);
-            
-            // Log every 100 packets
-            if (audioPacketCount % 100 === 0) {
-              console.log(`[Voice Stream] Audio: received ${audioPacketCount} packets from Twilio, sent ${audioSentCount} packets to Twilio`);
-            }
+          // ========================================
+          // 7. RELAY TWILIO → OPENAI (Audio from user)
+          // ========================================
+          if (openaiWs && openaiWs.readyState === 1 && data.media?.payload) {
+            openaiWs.send(JSON.stringify({
+              type: 'input_audio_buffer.append',
+              audio: data.media.payload
+            }));
           }
           break;
 
         case 'stop':
           console.log('[Voice Stream] Call ended');
           
-          // Cleanup
-          if (openaiClient) {
-            openaiClient.close();
+          // Mark conversation as completed
+          if (conversationId) {
+            await prisma.aiConversation.update({
+              where: { id: conversationId },
+              data: {
+                status: 'completed',
+                endedAt: new Date()
+              }
+            });
+          }
+
+          // Close OpenAI connection
+          if (openaiWs) {
+            openaiWs.close();
           }
           break;
       }
@@ -168,10 +285,23 @@ Ask clarifying questions when needed and be professional.`;
     }
   });
 
-  twilioWs.on('close', () => {
+  twilioWs.on('close', async () => {
     console.log('[Voice Stream] Client disconnected');
-    if (openaiClient) {
-      openaiClient.close();
+    
+    // Mark conversation as completed
+    if (conversationId) {
+      await prisma.aiConversation.update({
+        where: { id: conversationId },
+        data: {
+          status: 'completed',
+          endedAt: new Date()
+        }
+      }).catch(err => console.error('[Voice Stream] Error updating conversation:', err));
+    }
+    
+    // Close OpenAI connection
+    if (openaiWs) {
+      openaiWs.close();
     }
   });
 
