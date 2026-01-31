@@ -14,10 +14,9 @@ function handleVoiceWebhook(req, res) {
     const host = process.env.VOICE_SERVER_URL || req.get('host');
     const protocol = host.includes('localhost') ? 'ws' : 'wss';
 
-    // Return TwiML with Stream directive pointing to /media-stream path
+    // Return TwiML with Stream directive pointing to /media-stream path (NO <Say> - AI will greet)
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Please wait while I connect you to our AI assistant.</Say>
   <Connect>
     <Stream url="${protocol}://${host}/media-stream">
       <Parameter name="callSid" value="${callSid}" />
@@ -89,6 +88,18 @@ Ask clarifying questions when needed and be professional.`;
             console.log('[OpenAI] Received message type:', msg.type); // LOG ALL MESSAGE TYPES
             try {
               switch (msg.type) {
+                case 'session.updated':
+                  // Session ready - make AI greet immediately
+                  console.log('[OpenAI] Session ready - triggering AI greeting');
+                  openaiClient.sendEvent({
+                    type: 'response.create',
+                    response: {
+                      modalities: ['audio', 'text'],
+                      instructions: 'Greet the caller warmly and introduce yourself as their AI assistant. Ask how you can help them today.'
+                    }
+                  });
+                  break;
+
                 case 'response.audio.delta':
                   // Stream audio back to Twilio
                   if (streamSid && twilioWs.readyState === 1) { // 1 = OPEN
