@@ -91,12 +91,8 @@ Ask clarifying questions when needed and be professional.`;
                 case 'session.updated':
                   // Session ready - make AI greet immediately
                   console.log('[OpenAI] Session ready - triggering AI greeting');
-                  openaiClient.sendEvent({
-                    type: 'response.create',
-                    response: {
-                      modalities: ['audio', 'text'],
-                      instructions: 'Greet the caller warmly and introduce yourself as their AI assistant. Ask how you can help them today.'
-                    }
+                  openaiClient.send({
+                    type: 'response.create'
                   });
                   break;
 
