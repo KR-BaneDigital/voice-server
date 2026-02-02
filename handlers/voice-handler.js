@@ -189,6 +189,14 @@ Use this knowledge base to accurately answer questions. If you don't know someth
             try {
               const response = JSON.parse(msg.toString());
 
+              // 🔍 LOG EVERY MESSAGE FROM OPENAI
+              console.log('[OpenAI] Message received:', {
+                type: response.type,
+                keys: Object.keys(response),
+                hasAudio: !!response.delta,
+                hasTranscript: !!response.transcript
+              });
+
               // Stream audio to Twilio
               if (response.type === 'response.audio.delta' && response.delta) {
                 if (streamSid && twilioWs.readyState === 1) {
