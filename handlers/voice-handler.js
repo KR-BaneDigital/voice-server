@@ -137,7 +137,6 @@ Use this knowledge base to accurately answer questions. If you don't know someth
             data: {
               aiAgentId: agent.id,
               agencyId: agent.agencyId,
-              contactPhone: fromPhone,
               channel: 'voice',
               status: 'active'
             }

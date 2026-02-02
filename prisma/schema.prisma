@@ -91,7 +91,6 @@ model Conversation {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   agencyId    String    @map("agency_id") @db.Uuid
   aiAgentId   String?   @map("ai_agent_id") @db.Uuid
-  contactPhone String?  @map("contact_phone") @db.VarChar(20)
   channel     String    @db.VarChar(20)
   status      String    @default("active") @db.VarChar(20)
   startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz
