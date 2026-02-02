@@ -202,6 +202,11 @@ Use this knowledge base to accurately answer questions. If you don't know someth
                 hasAudio: !!response.delta,
                 hasTranscript: !!response.transcript
               });
+              
+              // 🔍 LOG FULL response.done TO SEE WHY NO AUDIO
+              if (response.type === 'response.done') {
+                console.log('[OpenAI] FULL response.done:', JSON.stringify(response, null, 2));
+              }
 
               // Stream audio to Twilio
               if (response.type === 'response.audio.delta' && response.delta) {
