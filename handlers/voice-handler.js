@@ -148,7 +148,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
           // 5. CONNECT TO OPENAI REALTIME API
           // ========================================
           openaiWs = new WebSocket(
-            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
+            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview',
             {
               headers: {
                 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
