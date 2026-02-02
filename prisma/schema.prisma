@@ -30,12 +30,13 @@ model PhoneNumber {
 // ============================================================================
 
 model AiAgent {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  agencyId      String   @map("agency_id") @db.Uuid
-  name          String   @db.VarChar(255)
-  status        String   @default("active") @db.VarChar(20)
-  systemPrompt  String?  @map("system_prompt") @db.Text
-  phoneNumberId String?  @map("phone_number_id") @db.Uuid
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agencyId       String   @map("agency_id") @db.Uuid
+  name           String   @db.VarChar(255)
+  status         String   @default("active") @db.VarChar(20)
+  systemPrompt   String?  @map("system_prompt") @db.Text
+  systemGreeting String?  @map("system_greeting") @db.Text
+  phoneNumberId  String?  @map("phone_number_id") @db.Uuid
   
   phoneNumber    PhoneNumber?           @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
   conversations  Conversation[]

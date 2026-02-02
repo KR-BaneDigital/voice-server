@@ -180,12 +180,30 @@ Use this knowledge base to accurately answer questions. If you don't know someth
               }
             }));
             
-            // TRIGGER IMMEDIATE GREETING (for inbound calls)
-            openaiWs.send(JSON.stringify({
-              type: 'response.create'
-            }));
-            
-            console.log('[OpenAI] Session configured - greeting triggered');
+            // If systemGreeting exists, add it to conversation and trigger response
+            if (agent.systemGreeting) {
+              console.log('[OpenAI] Sending system greeting:', agent.systemGreeting);
+              
+              openaiWs.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{
+                    type: 'input_text',
+                    text: agent.systemGreeting
+                  }]
+                }
+              }));
+              
+              openaiWs.send(JSON.stringify({
+                type: 'response.create'
+              }));
+              
+              console.log('[OpenAI] Session configured - custom greeting triggered');
+            } else {
+              console.log('[OpenAI] Session configured - no greeting (waiting for user)');
+            }
           });
 
           // ========================================
