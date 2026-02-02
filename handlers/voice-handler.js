@@ -133,9 +133,10 @@ Use this knowledge base to accurately answer questions. If you don't know someth
           // ========================================
           // 4. CREATE CONVERSATION RECORD
           // ========================================
-          const conversation = await prisma.aiConversation.create({
+          const conversation = await prisma.conversation.create({
             data: {
-              agentId: agent.id,
+              aiAgentId: agent.id,
+              agencyId: agent.agencyId,
               contactPhone: fromPhone,
               channel: 'voice',
               status: 'active'
@@ -164,7 +165,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
             openaiWs.send(JSON.stringify({
               type: 'session.update',
               session: {
-                voice: agent.voice || 'alloy',
+                voice: 'alloy',
                 instructions: instructions,
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
@@ -206,7 +207,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
               if (response.type === 'conversation.item.input_audio_transcription.completed') {
                 console.log('[Voice Stream] User said:', response.transcript);
                 
-                await prisma.aiConversationMessage.create({
+                await prisma.conversationMessage.create({
                   data: {
                     conversationId: conversationId,
                     role: 'user',
@@ -223,7 +224,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
                 if (transcript) {
                   console.log('[Voice Stream] AI said:', transcript);
                   
-                  await prisma.aiConversationMessage.create({
+                  await prisma.conversationMessage.create({
                     data: {
                       conversationId: conversationId,
                       role: 'assistant',
@@ -264,7 +265,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
           
           // Mark conversation as completed
           if (conversationId) {
-            await prisma.aiConversation.update({
+            await prisma.conversation.update({
               where: { id: conversationId },
               data: {
                 status: 'completed',
@@ -290,7 +291,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
     
     // Mark conversation as completed
     if (conversationId) {
-      await prisma.aiConversation.update({
+      await prisma.conversation.update({
         where: { id: conversationId },
         data: {
           status: 'completed',

@@ -36,7 +36,6 @@ model AiAgent {
   status        String   @default("active") @db.VarChar(20)
   systemPrompt  String?  @map("system_prompt") @db.Text
   phoneNumberId String?  @map("phone_number_id") @db.Uuid
-  voice         String?  @db.VarChar(50)
   
   phoneNumber    PhoneNumber?           @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
   conversations  Conversation[]
