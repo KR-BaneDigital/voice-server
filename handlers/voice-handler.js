@@ -179,7 +179,13 @@ Use this knowledge base to accurately answer questions. If you don't know someth
                 }
               }
             }));
-            console.log('[OpenAI] Session configured - AI will greet automatically');
+            
+            // TRIGGER IMMEDIATE GREETING (for inbound calls)
+            openaiWs.send(JSON.stringify({
+              type: 'response.create'
+            }));
+            
+            console.log('[OpenAI] Session configured - greeting triggered');
           });
 
           // ========================================
