@@ -506,165 +506,223 @@ function endOfDay(date) {
 }
 
 /**
- * Generate available time slots for a given day
+ * Get available slots using AvailabilityConfig from database
+ * This is the REAL availability logic - uses timezone, buffers, min notice, etc.
  */
-function generateAvailableSlots(targetDate, existingEvents, durationMinutes = 30) {
-  const slots = [];
-  const startHour = 9; // 9 AM
-  const endHour = 17; // 5 PM
+async function getAvailableSlotsFromConfig(agencyId, date, durationMinutes = 30) {
+  try {
+    // 1. Get availability config from database
+    const config = await prisma.availabilityConfig.findUnique({
+      where: { agencyId },
+    });
 
-  // Generate all possible slots
-  for (let hour = startHour; hour < endHour; hour++) {
-    for (let minute = 0; minute < 60; minute += 30) {
-      const slotStart = new Date(targetDate);
-      slotStart.setHours(hour, minute, 0, 0);
+    if (!config) {
+      console.log('[Availability] No config found for agency:', agencyId);
+      return [];
+    }
 
-      const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60000);
+    const { weeklySchedule, timezone, defaultBuffer, minNotice, maxPerDay, bookingWindow } = config;
+    console.log('[Availability] Config loaded:', { timezone, defaultBuffer, minNotice, maxPerDay, bookingWindow });
 
-      // Check if slot conflicts with existing events
-      const hasConflict = existingEvents.some(event => {
-        const eventStart = new Date(event.startTime);
-        const eventEnd = new Date(event.endTime);
-        return (slotStart < eventEnd && slotEnd > eventStart);
-      });
+    // 2. Check booking window
+    const today = new Date();
+    const daysDiff = Math.ceil((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysDiff > bookingWindow) {
+      console.log('[Availability] Outside booking window:', daysDiff, '>', bookingWindow);
+      return [];
+    }
 
-      if (!hasConflict) {
-        slots.push(slotStart);
+    // 3. Get day of week and check weekly schedule
+    const dayName = date.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const schedule = weeklySchedule[dayName] || [];
+
+    console.log('[Availability] Day:', dayName, 'Schedule:', schedule);
+
+    if (!Array.isArray(schedule) || schedule.length === 0) {
+      console.log('[Availability] No schedule for', dayName);
+      return [];
+    }
+
+    // 4. Get existing events for the day
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const existingEvents = await prisma.calendarEvent.findMany({
+      where: {
+        agencyId,
+        startTime: { gte: startOfDay, lte: endOfDay },
+        status: { not: 'cancelled' },
+      },
+      select: { startTime: true, endTime: true },
+    });
+
+    console.log('[Availability] Existing events on', dayName, ':', existingEvents.length);
+
+    // 5. Check max per day limit
+    if (maxPerDay && existingEvents.length >= maxPerDay) {
+      console.log('[Availability] Max per day reached:', existingEvents.length, '>=', maxPerDay);
+      return [];
+    }
+
+    // 6. Generate slots based on weekly schedule
+    const now = new Date();
+    const availableSlots = [];
+
+    for (const timeRange of schedule) {
+      const { start, end } = timeRange;
+
+      // Parse start and end times
+      let startHour, startMin, endHour, endMin;
+
+      if (typeof start === 'number') {
+        startHour = start;
+        startMin = 0;
+      } else {
+        [startHour, startMin] = start.split(':').map(Number);
+      }
+
+      if (typeof end === 'number') {
+        endHour = end;
+        endMin = 0;
+      } else {
+        [endHour, endMin] = end.split(':').map(Number);
+      }
+
+      // Create datetime objects with timezone offset (EST = -05:00)
+      const baseDate = date.toISOString().split('T')[0];
+      const rangeStart = new Date(`${baseDate}T${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}:00-05:00`);
+      const rangeEnd = new Date(`${baseDate}T${String(endHour).padStart(2,'0')}:${String(endMin).padStart(2,'0')}:00-05:00`);
+
+      console.log('[Availability] Time range:', rangeStart.toISOString(), 'to', rangeEnd.toISOString());
+
+      // Generate 30-minute slots
+      const slotInterval = 30;
+      let currentSlot = new Date(rangeStart);
+
+      while (currentSlot.getTime() + (durationMinutes * 60 * 1000) <= rangeEnd.getTime()) {
+        const slotEnd = new Date(currentSlot.getTime() + (durationMinutes * 60 * 1000));
+
+        // Check minimum notice
+        const minutesUntilSlot = (currentSlot.getTime() - now.getTime()) / (1000 * 60);
+        if (minutesUntilSlot < minNotice) {
+          currentSlot = new Date(currentSlot.getTime() + (slotInterval * 60 * 1000));
+          continue;
+        }
+
+        // Check conflicts with existing events (including buffer)
+        const hasConflict = existingEvents.some(event => {
+          const eventStart = new Date(event.startTime);
+          const eventEnd = new Date(event.endTime);
+          eventStart.setMinutes(eventStart.getMinutes() - defaultBuffer);
+          eventEnd.setMinutes(eventEnd.getMinutes() + defaultBuffer);
+          return (currentSlot < eventEnd && slotEnd > eventStart);
+        });
+
+        if (!hasConflict) {
+          availableSlots.push({
+            start: currentSlot.toISOString(),
+            end: slotEnd.toISOString(),
+          });
+        }
+
+        currentSlot = new Date(currentSlot.getTime() + (slotInterval * 60 * 1000));
       }
     }
-  }
 
-  return slots;
+    console.log('[Availability] Generated', availableSlots.length, 'slots');
+    return availableSlots;
+
+  } catch (error) {
+    console.error('[Availability] Error:', error);
+    return [];
+  }
 }
 
 /**
- * Check availability for appointments - calls main app API
+ * Check availability for appointments - DIRECT DATABASE ACCESS
  */
 async function checkAvailability(agencyId, args) {
   console.log('[checkAvailability] START:', { agencyId, args });
 
-  // Validate agencyId
   if (!agencyId) {
     console.error('[checkAvailability] Missing agencyId');
-    return {
-      success: false,
-      message: 'Unable to check availability. Please try again.'
-    };
+    return { success: false, message: 'Unable to check availability. Please try again.' };
   }
 
   const { date, duration = 30 } = args;
 
-  // Validate date parameter
   if (!date) {
     console.error('[checkAvailability] Missing date parameter');
-    return {
-      success: false,
-      message: 'Please specify a date to check availability.'
-    };
+    return { success: false, message: 'Please specify a date to check availability.' };
   }
 
   // Parse date (handle "tomorrow", "next monday", etc.)
   const targetDate = parseNaturalDate(date);
   const dateStr = targetDate.toISOString().split('T')[0];
 
-  console.log('[checkAvailability] Calling main app API:', {
-    date: dateStr,
-    duration,
-    agencyId
+  console.log('[checkAvailability] Checking date:', dateStr, 'for agency:', agencyId);
+
+  // Get slots directly from database using AvailabilityConfig
+  const slots = await getAvailableSlotsFromConfig(agencyId, targetDate, duration);
+
+  // Format slots for voice response
+  const formattedSlots = slots.map(slot => {
+    const slotDate = new Date(slot.start);
+    return slotDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   });
 
-  try {
-    const response = await fetch(
-      `${process.env.MAIN_APP_URL}/api/calendar/availability/slots?date=${dateStr}&duration=${duration}&agencyId=${agencyId}`,
-      {
-        headers: { 'x-api-key': process.env.INTERNAL_API_KEY }
-      }
-    );
+  console.log('[checkAvailability] Found', formattedSlots.length, 'slots');
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[checkAvailability] API error:', response.status, errorText);
-      return {
-        success: false,
-        message: 'Unable to check availability right now. Please try again.'
-      };
-    }
-
-    const data = await response.json();
-    console.log('[checkAvailability] API response:', { slotsCount: data.slots?.length });
-
-    // Format slots for voice response
-    const formattedSlots = (data.slots || []).map(slot => {
-      const slotDate = new Date(slot.start);
-      return slotDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    });
-
-    return {
-      success: true,
-      date: dateStr,
-      availableSlots: formattedSlots,
-      message: formattedSlots.length > 0
-        ? `Available times on ${targetDate.toDateString()}: ${formattedSlots.length} slots`
-        : 'No availability on that date'
-    };
-  } catch (error) {
-    console.error('[checkAvailability] Error calling API:', error);
-    return {
-      success: false,
-      message: 'Unable to check availability right now. Please try again.'
-    };
-  }
+  return {
+    success: true,
+    date: dateStr,
+    availableSlots: formattedSlots,
+    message: formattedSlots.length > 0
+      ? `Available times on ${targetDate.toDateString()}: ${formattedSlots.length} slots`
+      : 'No availability on that date'
+  };
 }
 
 /**
- * Book an appointment - calls main app API (includes Google Calendar sync)
+ * Book an appointment - DIRECT DATABASE ACCESS
  */
 async function bookAppointment(agencyId, conversationId, args) {
   const { dateTime, duration = 30, title = 'Phone Appointment', notes } = args;
 
-  console.log('[bookAppointment] Calling main app API:', { agencyId, dateTime, duration, title });
+  console.log('[bookAppointment] Creating event directly:', { agencyId, dateTime, duration, title });
 
   try {
-    const response = await fetch(
-      `${process.env.MAIN_APP_URL}/api/calendar/events`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.INTERNAL_API_KEY
-        },
-        body: JSON.stringify({
-          agencyId,
-          title,
-          startTime: dateTime,
-          duration,
-          notes,
-          eventType: 'appointment',
-          metadata: { bookedVia: 'voice_ai', conversationId }
-        })
+    const startTime = new Date(dateTime);
+    const endTime = new Date(startTime.getTime() + duration * 60000);
+
+    const event = await prisma.calendarEvent.create({
+      data: {
+        agencyId,
+        title,
+        startTime,
+        endTime,
+        status: 'scheduled',
+        eventType: 'appointment',
+        notes,
+        metadata: {
+          bookedVia: 'voice_ai',
+          conversationId
+        }
       }
-    );
+    });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[bookAppointment] API error:', response.status, errorText);
-      return {
-        success: false,
-        message: 'Unable to book the appointment right now. Please try again.'
-      };
-    }
-
-    const event = await response.json();
     console.log('[bookAppointment] Event created:', event.id);
 
     return {
       success: true,
       eventId: event.id,
-      dateTime,
-      message: `Appointment booked for ${new Date(dateTime).toLocaleString()}`
+      dateTime: startTime.toISOString(),
+      message: `Appointment booked for ${startTime.toLocaleString()}`
     };
   } catch (error) {
-    console.error('[bookAppointment] Error calling API:', error);
+    console.error('[bookAppointment] Error:', error);
     return {
       success: false,
       message: 'Unable to book the appointment right now. Please try again.'
@@ -673,7 +731,7 @@ async function bookAppointment(agencyId, conversationId, args) {
 }
 
 /**
- * Find the next available appointment slot - calls main app API
+ * Find the next available appointment slot - DIRECT DATABASE ACCESS
  */
 async function getNextAvailableSlot(agencyId, args) {
   console.log('[getNextAvailableSlot] START:', { agencyId, args });
@@ -687,67 +745,40 @@ async function getNextAvailableSlot(agencyId, args) {
   const maxDays = Math.min(daysToSearch, 30);
   const now = new Date();
 
-  // Search through days to find first available slot
   for (let dayOffset = 0; dayOffset < maxDays; dayOffset++) {
     const checkDate = new Date(now);
     checkDate.setDate(now.getDate() + dayOffset);
 
-    // Skip weekends (the main app handles this too, but skip to save API calls)
-    if (checkDate.getDay() === 0 || checkDate.getDay() === 6) continue;
-
     const dateStr = checkDate.toISOString().split('T')[0];
+    console.log('[getNextAvailableSlot] Checking:', dateStr);
 
-    console.log('[getNextAvailableSlot] Checking day:', { dayOffset, date: dateStr });
+    // Get slots directly from database
+    const slots = await getAvailableSlotsFromConfig(agencyId, checkDate, duration);
 
-    try {
-      const response = await fetch(
-        `${process.env.MAIN_APP_URL}/api/calendar/availability/slots?date=${dateStr}&duration=${duration}&agencyId=${agencyId}`,
-        {
-          headers: { 'x-api-key': process.env.INTERNAL_API_KEY }
-        }
-      );
+    if (slots.length > 0) {
+      const nextSlot = new Date(slots[0].start);
+      const formattedDate = checkDate.toDateString();
+      const formattedTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
-      if (!response.ok) {
-        console.error('[getNextAvailableSlot] API error on', dateStr, ':', response.status);
-        continue;
-      }
+      console.log('[getNextAvailableSlot] Found:', formattedDate, formattedTime);
 
-      const data = await response.json();
-      const slots = data.slots || [];
-
-      console.log('[getNextAvailableSlot] Slots on', dateStr, ':', slots.length);
-
-      if (slots.length > 0) {
-        const nextSlot = new Date(slots[0].start);
-        const formattedDate = checkDate.toDateString();
-        const formattedTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-
-        console.log('[getNextAvailableSlot] Found:', { date: formattedDate, time: formattedTime });
-
-        return {
-          success: true,
-          nextAvailable: {
-            dateTime: slots[0].start,
-            formatted: `${formattedDate} at ${formattedTime}`
-          },
-          otherSlots: slots.slice(1, 4).map(s => {
-            const slotTime = new Date(s.start);
-            return slotTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-          }),
-          message: `Next available: ${formattedDate} at ${formattedTime}`
-        };
-      }
-    } catch (error) {
-      console.error('[getNextAvailableSlot] Error checking', dateStr, ':', error);
-      continue;
+      return {
+        success: true,
+        nextAvailable: {
+          dateTime: slots[0].start,
+          formatted: `${formattedDate} at ${formattedTime}`
+        },
+        otherSlots: slots.slice(1, 4).map(s => {
+          const slotTime = new Date(s.start);
+          return slotTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        }),
+        message: `Next available: ${formattedDate} at ${formattedTime}`
+      };
     }
   }
 
   console.log('[getNextAvailableSlot] No slots found in', maxDays, 'days');
-  return {
-    success: false,
-    message: `No availability in the next ${maxDays} days.`
-  };
+  return { success: false, message: `No availability in the next ${maxDays} days.` };
 }
 
 /**
