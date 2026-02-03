@@ -511,17 +511,46 @@ function endOfDay(date) {
  */
 async function getAvailableSlotsFromConfig(agencyId, date, durationMinutes = 30) {
   try {
+    // Default 9-5 M-F schedule (same as main app)
+    const DEFAULT_SCHEDULE = {
+      monday: [{ start: 9, end: 17 }],
+      tuesday: [{ start: 9, end: 17 }],
+      wednesday: [{ start: 9, end: 17 }],
+      thursday: [{ start: 9, end: 17 }],
+      friday: [{ start: 9, end: 17 }],
+      saturday: [],
+      sunday: [],
+    };
+
     // 1. Get availability config from database
-    const config = await prisma.availabilityConfig.findUnique({
+    let config = await prisma.availabilityConfig.findUnique({
       where: { agencyId },
     });
 
+    // Use defaults if no config exists
     if (!config) {
-      console.log('[Availability] No config found for agency:', agencyId);
-      return [];
+      console.log('[Availability] No config found, using defaults for agency:', agencyId);
+      config = {
+        weeklySchedule: DEFAULT_SCHEDULE,
+        timezone: 'America/New_York',
+        defaultBuffer: 15,
+        minNotice: 120,
+        maxPerDay: null,
+        bookingWindow: 30,
+      };
     }
 
-    const { weeklySchedule, timezone, defaultBuffer, minNotice, maxPerDay, bookingWindow } = config;
+    let { weeklySchedule, timezone, defaultBuffer, minNotice, maxPerDay, bookingWindow } = config;
+
+    // Check if weeklySchedule is empty, use defaults
+    const hasAnyBlocks = weeklySchedule && typeof weeklySchedule === 'object' &&
+      Object.values(weeklySchedule).some(blocks => Array.isArray(blocks) && blocks.length > 0);
+
+    if (!hasAnyBlocks) {
+      console.log('[Availability] Empty schedule, using defaults');
+      weeklySchedule = DEFAULT_SCHEDULE;
+    }
+
     console.log('[Availability] Config loaded:', { timezone, defaultBuffer, minNotice, maxPerDay, bookingWindow });
 
     // 2. Check booking window
