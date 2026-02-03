@@ -538,7 +538,7 @@ function generateAvailableSlots(targetDate, existingEvents, durationMinutes = 30
 }
 
 /**
- * Check availability for appointments
+ * Check availability for appointments - calls main app API
  */
 async function checkAvailability(agencyId, args) {
   console.log('[checkAvailability] START:', { agencyId, args });
@@ -565,87 +565,115 @@ async function checkAvailability(agencyId, args) {
 
   // Parse date (handle "tomorrow", "next monday", etc.)
   const targetDate = parseNaturalDate(date);
-  const dayStart = startOfDay(targetDate);
-  const dayEnd = endOfDay(targetDate);
+  const dateStr = targetDate.toISOString().split('T')[0];
 
-  console.log('[checkAvailability] Query range:', {
-    targetDate: targetDate.toISOString(),
-    dayStart: dayStart.toISOString(),
-    dayEnd: dayEnd.toISOString()
+  console.log('[checkAvailability] Calling main app API:', {
+    date: dateStr,
+    duration,
+    agencyId
   });
 
-  // Get existing events that overlap with that day
-  const events = await prisma.calendarEvent.findMany({
-    where: {
-      agencyId,
-      AND: [
-        { startTime: { lt: dayEnd } },
-        { endTime: { gt: dayStart } }
-      ],
-      status: { not: 'cancelled' }
+  try {
+    const response = await fetch(
+      `${process.env.MAIN_APP_URL}/api/calendar/availability/slots?date=${dateStr}&duration=${duration}&agencyId=${agencyId}`,
+      {
+        headers: { 'x-api-key': process.env.INTERNAL_API_KEY }
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[checkAvailability] API error:', response.status, errorText);
+      return {
+        success: false,
+        message: 'Unable to check availability right now. Please try again.'
+      };
     }
-  });
 
-  console.log('[checkAvailability] Events found:', events.length, events.map(e => ({
-    id: e.id,
-    title: e.title,
-    start: e.startTime,
-    end: e.endTime
-  })));
+    const data = await response.json();
+    console.log('[checkAvailability] API response:', { slotsCount: data.slots?.length });
 
-  // Generate available slots (9am-5pm, 30-min intervals)
-  const slots = generateAvailableSlots(targetDate, events, duration);
+    // Format slots for voice response
+    const formattedSlots = (data.slots || []).map(slot => {
+      const slotDate = new Date(slot.start);
+      return slotDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    });
 
-  console.log('[checkAvailability] Available slots:', slots.length);
-
-  return {
-    success: true,
-    date: targetDate.toISOString().split('T')[0],
-    availableSlots: slots.map(s => s.toLocaleTimeString('en-US', {
-      hour: 'numeric', minute: '2-digit'
-    })),
-    message: slots.length > 0
-      ? `Available times on ${targetDate.toDateString()}: ${slots.length} slots`
-      : 'No availability on that date'
-  };
+    return {
+      success: true,
+      date: dateStr,
+      availableSlots: formattedSlots,
+      message: formattedSlots.length > 0
+        ? `Available times on ${targetDate.toDateString()}: ${formattedSlots.length} slots`
+        : 'No availability on that date'
+    };
+  } catch (error) {
+    console.error('[checkAvailability] Error calling API:', error);
+    return {
+      success: false,
+      message: 'Unable to check availability right now. Please try again.'
+    };
+  }
 }
 
 /**
- * Book an appointment
+ * Book an appointment - calls main app API (includes Google Calendar sync)
  */
 async function bookAppointment(agencyId, conversationId, args) {
   const { dateTime, duration = 30, title = 'Phone Appointment', notes } = args;
 
-  const startTime = new Date(dateTime);
-  const endTime = new Date(startTime.getTime() + duration * 60000);
+  console.log('[bookAppointment] Calling main app API:', { agencyId, dateTime, duration, title });
 
-  // Create calendar event
-  const event = await prisma.calendarEvent.create({
-    data: {
-      agencyId,
-      title,
-      startTime,
-      endTime,
-      status: 'scheduled',
-      eventType: 'appointment',
-      notes,
-      metadata: {
-        bookedVia: 'voice_ai',
-        conversationId
+  try {
+    const response = await fetch(
+      `${process.env.MAIN_APP_URL}/api/calendar/events`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.INTERNAL_API_KEY
+        },
+        body: JSON.stringify({
+          agencyId,
+          title,
+          startTime: dateTime,
+          duration,
+          notes,
+          eventType: 'appointment',
+          metadata: { bookedVia: 'voice_ai', conversationId }
+        })
       }
-    }
-  });
+    );
 
-  return {
-    success: true,
-    eventId: event.id,
-    dateTime: startTime.toISOString(),
-    message: `Appointment booked for ${startTime.toLocaleString()}`
-  };
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[bookAppointment] API error:', response.status, errorText);
+      return {
+        success: false,
+        message: 'Unable to book the appointment right now. Please try again.'
+      };
+    }
+
+    const event = await response.json();
+    console.log('[bookAppointment] Event created:', event.id);
+
+    return {
+      success: true,
+      eventId: event.id,
+      dateTime,
+      message: `Appointment booked for ${new Date(dateTime).toLocaleString()}`
+    };
+  } catch (error) {
+    console.error('[bookAppointment] Error calling API:', error);
+    return {
+      success: false,
+      message: 'Unable to book the appointment right now. Please try again.'
+    };
+  }
 }
 
 /**
- * Find the next available appointment slot
+ * Find the next available appointment slot - calls main app API
  */
 async function getNextAvailableSlot(agencyId, args) {
   console.log('[getNextAvailableSlot] START:', { agencyId, args });
@@ -659,65 +687,59 @@ async function getNextAvailableSlot(agencyId, args) {
   const maxDays = Math.min(daysToSearch, 30);
   const now = new Date();
 
+  // Search through days to find first available slot
   for (let dayOffset = 0; dayOffset < maxDays; dayOffset++) {
     const checkDate = new Date(now);
     checkDate.setDate(now.getDate() + dayOffset);
 
-    // Skip weekends
+    // Skip weekends (the main app handles this too, but skip to save API calls)
     if (checkDate.getDay() === 0 || checkDate.getDay() === 6) continue;
 
-    const dayStart = startOfDay(checkDate);
-    const dayEnd = endOfDay(checkDate);
+    const dateStr = checkDate.toISOString().split('T')[0];
 
-    console.log('[getNextAvailableSlot] Checking day:', {
-      dayOffset,
-      date: checkDate.toDateString(),
-      dayStart: dayStart.toISOString(),
-      dayEnd: dayEnd.toISOString()
-    });
+    console.log('[getNextAvailableSlot] Checking day:', { dayOffset, date: dateStr });
 
-    const events = await prisma.calendarEvent.findMany({
-      where: {
-        agencyId,
-        AND: [
-          { startTime: { lt: dayEnd } },
-          { endTime: { gt: dayStart } }
-        ],
-        status: { not: 'cancelled' }
+    try {
+      const response = await fetch(
+        `${process.env.MAIN_APP_URL}/api/calendar/availability/slots?date=${dateStr}&duration=${duration}&agencyId=${agencyId}`,
+        {
+          headers: { 'x-api-key': process.env.INTERNAL_API_KEY }
+        }
+      );
+
+      if (!response.ok) {
+        console.error('[getNextAvailableSlot] API error on', dateStr, ':', response.status);
+        continue;
       }
-    });
 
-    console.log('[getNextAvailableSlot] Events on', checkDate.toDateString(), ':', events.length);
+      const data = await response.json();
+      const slots = data.slots || [];
 
-    let slots = generateAvailableSlots(checkDate, events, duration);
+      console.log('[getNextAvailableSlot] Slots on', dateStr, ':', slots.length);
 
-    // Filter past slots for today
-    if (dayOffset === 0) {
-      const currentHour = now.getHours();
-      const currentMinute = now.getMinutes();
-      slots = slots.filter(s => {
-        const slotHour = s.getHours();
-        const slotMinute = s.getMinutes();
-        return slotHour > currentHour || (slotHour === currentHour && slotMinute > currentMinute);
-      });
-    }
+      if (slots.length > 0) {
+        const nextSlot = new Date(slots[0].start);
+        const formattedDate = checkDate.toDateString();
+        const formattedTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
-    if (slots.length > 0) {
-      const nextSlot = slots[0];
-      const formattedDate = checkDate.toDateString();
-      const formattedTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        console.log('[getNextAvailableSlot] Found:', { date: formattedDate, time: formattedTime });
 
-      console.log('[getNextAvailableSlot] Found:', { date: formattedDate, time: formattedTime, totalSlots: slots.length });
-
-      return {
-        success: true,
-        nextAvailable: {
-          dateTime: nextSlot.toISOString(),
-          formatted: `${formattedDate} at ${formattedTime}`
-        },
-        otherSlots: slots.slice(1, 4).map(s => s.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })),
-        message: `Next available: ${formattedDate} at ${formattedTime}`
-      };
+        return {
+          success: true,
+          nextAvailable: {
+            dateTime: slots[0].start,
+            formatted: `${formattedDate} at ${formattedTime}`
+          },
+          otherSlots: slots.slice(1, 4).map(s => {
+            const slotTime = new Date(s.start);
+            return slotTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+          }),
+          message: `Next available: ${formattedDate} at ${formattedTime}`
+        };
+      }
+    } catch (error) {
+      console.error('[getNextAvailableSlot] Error checking', dateStr, ':', error);
+      continue;
     }
   }
 
