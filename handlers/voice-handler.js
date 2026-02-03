@@ -105,7 +105,13 @@ async function handleVoiceStream(twilioWs, initialCallSid) {
           }
 
           agentId = agent.id;
-          console.log('[Voice Stream] Agent found:', { agentId, name: agent.name });
+          console.log('[Voice Stream] Agent found:', {
+            agentId,
+            name: agent.name,
+            voiceModel: agent.voiceModel,
+            language: agent.language,
+            hasGreeting: !!agent.systemGreeting
+          });
 
           // ========================================
           // 2. BUILD KNOWLEDGE BASE CONTEXT
@@ -123,7 +129,9 @@ async function handleVoiceStream(twilioWs, initialCallSid) {
           // ========================================
           // 3. BUILD SYSTEM INSTRUCTIONS
           // ========================================
-          const instructions = `${agent.systemPrompt || 'You are a helpful AI assistant.'}
+          const instructions = `You must respond only in English. Never switch languages under any circumstances.
+
+${agent.systemPrompt || 'You are a helpful AI assistant.'}
 
 ${knowledgeDocs ? `KNOWLEDGE BASE:
 ${knowledgeDocs}
@@ -164,7 +172,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
             openaiWs.send(JSON.stringify({
               type: 'session.update',
               session: {
-                voice: agent.language === 'fr' ? 'shimmer' : 'alloy',
+                voice: agent.voiceModel || 'alloy',
                 instructions: instructions,
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
@@ -180,27 +188,29 @@ Use this knowledge base to accurately answer questions. If you don't know someth
               }
             }));
             
-            // If systemGreeting exists, add it to conversation and trigger response
+            // If systemGreeting exists, trigger AI to speak the greeting first
             if (agent.systemGreeting) {
-              console.log('[OpenAI] Sending system greeting:', agent.systemGreeting);
-              
+              console.log('[OpenAI] Triggering system greeting:', agent.systemGreeting);
+
+              // Add a hidden user message that prompts the AI to greet
               openaiWs.send(JSON.stringify({
                 type: 'conversation.item.create',
                 item: {
                   type: 'message',
-                  role: 'assistant',
+                  role: 'user',
                   content: [{
                     type: 'input_text',
-                    text: agent.systemGreeting
+                    text: `[SYSTEM: The caller just connected. Greet them by saying exactly: "${agent.systemGreeting}"]`
                   }]
                 }
               }));
-              
+
+              // Trigger the AI to respond (with the greeting)
               openaiWs.send(JSON.stringify({
                 type: 'response.create'
               }));
-              
-              console.log('[OpenAI] Session configured - custom greeting triggered');
+
+              console.log('[OpenAI] Session configured - greeting triggered');
             } else {
               console.log('[OpenAI] Session configured - no greeting (waiting for user)');
             }
