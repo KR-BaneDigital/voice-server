@@ -9,6 +9,7 @@ const server = http.createServer(app);
 
 // ============================================================================
 // LOG CAPTURE SYSTEM - Stores recent logs for debugging via /logs endpoint
+// Last deploy trigger: 2026-02-03
 // ============================================================================
 const LOG_BUFFER_SIZE = 500;
 const logBuffer = [];
