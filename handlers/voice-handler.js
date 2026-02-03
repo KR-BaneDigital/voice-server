@@ -164,7 +164,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
             openaiWs.send(JSON.stringify({
               type: 'session.update',
               session: {
-                voice: 'alloy',
+                voice: agent.language === 'fr' ? 'shimmer' : 'alloy',
                 instructions: instructions,
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
