@@ -723,22 +723,31 @@ async function bookAppointment(agencyId, conversationId, args) {
   console.log('[bookAppointment] Creating event directly:', { agencyId, dateTime, duration, title });
 
   try {
+    // Get the first admin/owner of this agency for userId (required field)
+    const agencyMember = await prisma.agencyMember.findFirst({
+      where: { agencyId, status: 'active' },
+      orderBy: { createdAt: 'asc' },
+      select: { userId: true }
+    });
+
+    if (!agencyMember) {
+      console.error('[bookAppointment] No agency member found for agency:', agencyId);
+      return { success: false, message: 'Unable to book appointment. Please try again.' };
+    }
+
     const startTime = new Date(dateTime);
     const endTime = new Date(startTime.getTime() + duration * 60000);
 
     const event = await prisma.calendarEvent.create({
       data: {
         agencyId,
+        userId: agencyMember.userId,
         title,
+        description: notes ? `${notes}\n\nBooked via voice AI (conversation: ${conversationId})` : `Booked via voice AI (conversation: ${conversationId})`,
         startTime,
         endTime,
         status: 'scheduled',
         eventType: 'appointment',
-        notes,
-        metadata: {
-          bookedVia: 'voice_ai',
-          conversationId
-        }
       }
     });
 
