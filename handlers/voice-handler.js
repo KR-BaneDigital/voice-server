@@ -167,13 +167,64 @@ Use this knowledge base to accurately answer questions. If you don't know someth
 
           openaiWs.on('open', () => {
             console.log('[OpenAI] Connected - configuring session');
-            
-            // Configure session with knowledge and voice
+
+            // Define tools for function calling
+            const tools = [
+              {
+                type: 'function',
+                name: 'check_availability',
+                description: 'Check available appointment slots for scheduling',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    date: {
+                      type: 'string',
+                      description: 'Date to check (YYYY-MM-DD or "tomorrow", "next monday")'
+                    },
+                    duration: {
+                      type: 'number',
+                      description: 'Meeting duration in minutes (default 30)'
+                    }
+                  },
+                  required: ['date']
+                }
+              },
+              {
+                type: 'function',
+                name: 'book_appointment',
+                description: 'Book an appointment at a specific date and time',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    dateTime: {
+                      type: 'string',
+                      description: 'ISO 8601 datetime for the appointment'
+                    },
+                    duration: {
+                      type: 'number',
+                      description: 'Duration in minutes (default 30)'
+                    },
+                    title: {
+                      type: 'string',
+                      description: 'Appointment title/reason'
+                    },
+                    notes: {
+                      type: 'string',
+                      description: 'Additional notes'
+                    }
+                  },
+                  required: ['dateTime']
+                }
+              }
+            ];
+
+            // Configure session with knowledge, voice, and tools
             openaiWs.send(JSON.stringify({
               type: 'session.update',
               session: {
                 voice: agent.voiceModel || 'alloy',
                 instructions: instructions,
+                tools: tools,
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
                 input_audio_transcription: {
@@ -269,7 +320,7 @@ Use this knowledge base to accurately answer questions. If you don't know someth
 
                 if (transcript) {
                   console.log('[Voice Stream] AI said:', transcript);
-                  
+
                   await prisma.conversationMessage.create({
                     data: {
                       conversationId: conversationId,
@@ -278,6 +329,20 @@ Use this knowledge base to accurately answer questions. If you don't know someth
                     }
                   });
                 }
+              }
+
+              // Handle function calls from AI
+              if (response.type === 'response.function_call_arguments.done') {
+                console.log('[Voice] Function call:', response.name, response.arguments);
+
+                await executeFunctionCall({
+                  openaiWs,
+                  agencyId: agent.agencyId,
+                  conversationId,
+                  functionName: response.name,
+                  callId: response.call_id,
+                  arguments: JSON.parse(response.arguments)
+                });
               }
             } catch (err) {
               console.error('[Voice Stream] Error handling OpenAI message:', err);
@@ -355,6 +420,207 @@ Use this knowledge base to accurately answer questions. If you don't know someth
   twilioWs.on('error', (error) => {
     console.error('[Voice Stream] WebSocket error:', error);
   });
+}
+
+// ============================================================================
+// FUNCTION CALLING - Helper Functions
+// ============================================================================
+
+/**
+ * Parse natural language dates like "tomorrow", "next monday", etc.
+ */
+function parseNaturalDate(dateStr) {
+  const today = new Date();
+  const lowered = dateStr.toLowerCase().trim();
+
+  if (lowered === 'today') {
+    return today;
+  }
+
+  if (lowered === 'tomorrow') {
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+    return tomorrow;
+  }
+
+  // Handle "next monday", "next tuesday", etc.
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const nextMatch = lowered.match(/next\s+(\w+)/);
+  if (nextMatch) {
+    const targetDay = dayNames.indexOf(nextMatch[1]);
+    if (targetDay !== -1) {
+      const result = new Date(today);
+      const currentDay = today.getDay();
+      let daysUntil = targetDay - currentDay;
+      if (daysUntil <= 0) daysUntil += 7;
+      result.setDate(today.getDate() + daysUntil);
+      return result;
+    }
+  }
+
+  // Try to parse as ISO date (YYYY-MM-DD)
+  const parsed = new Date(dateStr);
+  if (!isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  // Default to today if we can't parse
+  return today;
+}
+
+/**
+ * Get start of day for a date
+ */
+function startOfDay(date) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+/**
+ * Get end of day for a date
+ */
+function endOfDay(date) {
+  const result = new Date(date);
+  result.setHours(23, 59, 59, 999);
+  return result;
+}
+
+/**
+ * Generate available time slots for a given day
+ */
+function generateAvailableSlots(targetDate, existingEvents, durationMinutes = 30) {
+  const slots = [];
+  const startHour = 9; // 9 AM
+  const endHour = 17; // 5 PM
+
+  // Generate all possible slots
+  for (let hour = startHour; hour < endHour; hour++) {
+    for (let minute = 0; minute < 60; minute += 30) {
+      const slotStart = new Date(targetDate);
+      slotStart.setHours(hour, minute, 0, 0);
+
+      const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60000);
+
+      // Check if slot conflicts with existing events
+      const hasConflict = existingEvents.some(event => {
+        const eventStart = new Date(event.startTime);
+        const eventEnd = new Date(event.endTime);
+        return (slotStart < eventEnd && slotEnd > eventStart);
+      });
+
+      if (!hasConflict) {
+        slots.push(slotStart);
+      }
+    }
+  }
+
+  return slots;
+}
+
+/**
+ * Check availability for appointments
+ */
+async function checkAvailability(agencyId, args) {
+  const { date, duration = 30 } = args;
+
+  // Parse date (handle "tomorrow", "next monday", etc.)
+  const targetDate = parseNaturalDate(date);
+
+  // Get existing events for that day
+  const events = await prisma.calendarEvent.findMany({
+    where: {
+      agencyId,
+      startTime: {
+        gte: startOfDay(targetDate),
+        lt: endOfDay(targetDate)
+      },
+      status: { not: 'cancelled' }
+    }
+  });
+
+  // Generate available slots (9am-5pm, 30-min intervals)
+  const slots = generateAvailableSlots(targetDate, events, duration);
+
+  return {
+    date: targetDate.toISOString().split('T')[0],
+    availableSlots: slots.map(s => s.toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit'
+    })),
+    message: slots.length > 0
+      ? `Available times on ${targetDate.toDateString()}: ${slots.length} slots`
+      : 'No availability on that date'
+  };
+}
+
+/**
+ * Book an appointment
+ */
+async function bookAppointment(agencyId, conversationId, args) {
+  const { dateTime, duration = 30, title = 'Phone Appointment', notes } = args;
+
+  const startTime = new Date(dateTime);
+  const endTime = new Date(startTime.getTime() + duration * 60000);
+
+  // Create calendar event
+  const event = await prisma.calendarEvent.create({
+    data: {
+      agencyId,
+      title,
+      startTime,
+      endTime,
+      status: 'scheduled',
+      eventType: 'appointment',
+      notes,
+      metadata: {
+        bookedVia: 'voice_ai',
+        conversationId
+      }
+    }
+  });
+
+  return {
+    success: true,
+    eventId: event.id,
+    dateTime: startTime.toISOString(),
+    message: `Appointment booked for ${startTime.toLocaleString()}`
+  };
+}
+
+/**
+ * Execute a function call from the AI
+ */
+async function executeFunctionCall({ openaiWs, agencyId, conversationId, functionName, callId, arguments: args }) {
+  let result;
+
+  try {
+    switch (functionName) {
+      case 'check_availability':
+        result = await checkAvailability(agencyId, args);
+        break;
+      case 'book_appointment':
+        result = await bookAppointment(agencyId, conversationId, args);
+        break;
+      default:
+        result = { error: 'Unknown function' };
+    }
+  } catch (error) {
+    console.error('[Function] Execution error:', error);
+    result = { error: error.message };
+  }
+
+  // Send result back to OpenAI
+  openaiWs.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: {
+      type: 'function_call_output',
+      call_id: callId,
+      output: JSON.stringify(result)
+    }
+  }));
+
+  // Trigger AI to respond with the result
+  openaiWs.send(JSON.stringify({ type: 'response.create' }));
 }
 
 module.exports = {
