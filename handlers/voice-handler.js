@@ -215,6 +215,25 @@ Use this knowledge base to accurately answer questions. If you don't know someth
                   },
                   required: ['dateTime']
                 }
+              },
+              {
+                type: 'function',
+                name: 'get_next_available_slot',
+                description: 'Find the next available appointment slot. Use when user wants to book but has not specified a date.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    duration: {
+                      type: 'number',
+                      description: 'Meeting duration in minutes (default 30)'
+                    },
+                    daysToSearch: {
+                      type: 'number',
+                      description: 'Days to search ahead (default 7, max 30)'
+                    }
+                  },
+                  required: []
+                }
               }
             ];
 
@@ -522,27 +541,65 @@ function generateAvailableSlots(targetDate, existingEvents, durationMinutes = 30
  * Check availability for appointments
  */
 async function checkAvailability(agencyId, args) {
+  console.log('[checkAvailability] START:', { agencyId, args });
+
+  // Validate agencyId
+  if (!agencyId) {
+    console.error('[checkAvailability] Missing agencyId');
+    return {
+      success: false,
+      message: 'Unable to check availability. Please try again.'
+    };
+  }
+
   const { date, duration = 30 } = args;
+
+  // Validate date parameter
+  if (!date) {
+    console.error('[checkAvailability] Missing date parameter');
+    return {
+      success: false,
+      message: 'Please specify a date to check availability.'
+    };
+  }
 
   // Parse date (handle "tomorrow", "next monday", etc.)
   const targetDate = parseNaturalDate(date);
+  const dayStart = startOfDay(targetDate);
+  const dayEnd = endOfDay(targetDate);
 
-  // Get existing events for that day
+  console.log('[checkAvailability] Query range:', {
+    targetDate: targetDate.toISOString(),
+    dayStart: dayStart.toISOString(),
+    dayEnd: dayEnd.toISOString()
+  });
+
+  // Get existing events that overlap with that day
   const events = await prisma.calendarEvent.findMany({
     where: {
       agencyId,
-      startTime: {
-        gte: startOfDay(targetDate),
-        lt: endOfDay(targetDate)
-      },
+      AND: [
+        { startTime: { lt: dayEnd } },
+        { endTime: { gt: dayStart } }
+      ],
       status: { not: 'cancelled' }
     }
   });
 
+  console.log('[checkAvailability] Events found:', events.length, events.map(e => ({
+    id: e.id,
+    title: e.title,
+    start: e.startTime,
+    end: e.endTime
+  })));
+
   // Generate available slots (9am-5pm, 30-min intervals)
   const slots = generateAvailableSlots(targetDate, events, duration);
 
+  console.log('[checkAvailability] Available slots:', slots.length);
+
   return {
+    success: true,
     date: targetDate.toISOString().split('T')[0],
     availableSlots: slots.map(s => s.toLocaleTimeString('en-US', {
       hour: 'numeric', minute: '2-digit'
@@ -588,10 +645,95 @@ async function bookAppointment(agencyId, conversationId, args) {
 }
 
 /**
+ * Find the next available appointment slot
+ */
+async function getNextAvailableSlot(agencyId, args) {
+  console.log('[getNextAvailableSlot] START:', { agencyId, args });
+
+  if (!agencyId) {
+    console.error('[getNextAvailableSlot] Missing agencyId');
+    return { success: false, message: 'Unable to check availability.' };
+  }
+
+  const { duration = 30, daysToSearch = 7 } = args;
+  const maxDays = Math.min(daysToSearch, 30);
+  const now = new Date();
+
+  for (let dayOffset = 0; dayOffset < maxDays; dayOffset++) {
+    const checkDate = new Date(now);
+    checkDate.setDate(now.getDate() + dayOffset);
+
+    // Skip weekends
+    if (checkDate.getDay() === 0 || checkDate.getDay() === 6) continue;
+
+    const dayStart = startOfDay(checkDate);
+    const dayEnd = endOfDay(checkDate);
+
+    console.log('[getNextAvailableSlot] Checking day:', {
+      dayOffset,
+      date: checkDate.toDateString(),
+      dayStart: dayStart.toISOString(),
+      dayEnd: dayEnd.toISOString()
+    });
+
+    const events = await prisma.calendarEvent.findMany({
+      where: {
+        agencyId,
+        AND: [
+          { startTime: { lt: dayEnd } },
+          { endTime: { gt: dayStart } }
+        ],
+        status: { not: 'cancelled' }
+      }
+    });
+
+    console.log('[getNextAvailableSlot] Events on', checkDate.toDateString(), ':', events.length);
+
+    let slots = generateAvailableSlots(checkDate, events, duration);
+
+    // Filter past slots for today
+    if (dayOffset === 0) {
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      slots = slots.filter(s => {
+        const slotHour = s.getHours();
+        const slotMinute = s.getMinutes();
+        return slotHour > currentHour || (slotHour === currentHour && slotMinute > currentMinute);
+      });
+    }
+
+    if (slots.length > 0) {
+      const nextSlot = slots[0];
+      const formattedDate = checkDate.toDateString();
+      const formattedTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+      console.log('[getNextAvailableSlot] Found:', { date: formattedDate, time: formattedTime, totalSlots: slots.length });
+
+      return {
+        success: true,
+        nextAvailable: {
+          dateTime: nextSlot.toISOString(),
+          formatted: `${formattedDate} at ${formattedTime}`
+        },
+        otherSlots: slots.slice(1, 4).map(s => s.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })),
+        message: `Next available: ${formattedDate} at ${formattedTime}`
+      };
+    }
+  }
+
+  console.log('[getNextAvailableSlot] No slots found in', maxDays, 'days');
+  return {
+    success: false,
+    message: `No availability in the next ${maxDays} days.`
+  };
+}
+
+/**
  * Execute a function call from the AI
  */
 async function executeFunctionCall({ openaiWs, agencyId, conversationId, functionName, callId, arguments: args }) {
   let result;
+  console.log('[executeFunctionCall] START:', { functionName, callId, agencyId, args });
 
   try {
     switch (functionName) {
@@ -601,13 +743,19 @@ async function executeFunctionCall({ openaiWs, agencyId, conversationId, functio
       case 'book_appointment':
         result = await bookAppointment(agencyId, conversationId, args);
         break;
+      case 'get_next_available_slot':
+        result = await getNextAvailableSlot(agencyId, args);
+        break;
       default:
+        console.warn('[executeFunctionCall] Unknown function:', functionName);
         result = { error: 'Unknown function' };
     }
   } catch (error) {
     console.error('[Function] Execution error:', error);
-    result = { error: error.message };
+    result = { success: false, message: 'An error occurred. Please try again.' };
   }
+
+  console.log('[executeFunctionCall] Result:', { functionName, success: result.success !== false });
 
   // Send result back to OpenAI
   openaiWs.send(JSON.stringify({
