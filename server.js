@@ -7,6 +7,46 @@ const { handleVoiceWebhook, handleVoiceStream } = require('./handlers/voice-hand
 const app = express();
 const server = http.createServer(app);
 
+// ============================================================================
+// LOG CAPTURE SYSTEM - Stores recent logs for debugging via /logs endpoint
+// ============================================================================
+const LOG_BUFFER_SIZE = 500;
+const logBuffer = [];
+
+function captureLog(level, args) {
+  const timestamp = new Date().toISOString();
+  const message = args.map(arg =>
+    typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+  ).join(' ');
+
+  logBuffer.push({ timestamp, level, message });
+
+  // Keep buffer size limited
+  while (logBuffer.length > LOG_BUFFER_SIZE) {
+    logBuffer.shift();
+  }
+}
+
+// Override console methods to capture logs
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+console.log = (...args) => {
+  captureLog('info', args);
+  originalLog.apply(console, args);
+};
+
+console.error = (...args) => {
+  captureLog('error', args);
+  originalError.apply(console, args);
+};
+
+console.warn = (...args) => {
+  captureLog('warn', args);
+  originalWarn.apply(console, args);
+};
+
 // Create WebSocket server WITHOUT auto-attaching (GHL-style)
 const wss = new WebSocket.Server({ noServer: true });
 
@@ -16,12 +56,47 @@ app.use(express.urlencoded({ extended: true }));
 
 // Health check endpoint with WebSocket stats
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'voice-ai-server',
     activeConnections: wss.clients.size
   });
+});
+
+// ============================================================================
+// LOGS ENDPOINT - Returns recent logs for debugging
+// ============================================================================
+app.get('/logs', (req, res) => {
+  const level = req.query.level; // Optional filter: info, warn, error
+  const limit = Math.min(parseInt(req.query.limit) || 200, LOG_BUFFER_SIZE);
+  const format = req.query.format || 'text'; // text or json
+
+  let logs = level
+    ? logBuffer.filter(l => l.level === level)
+    : logBuffer;
+
+  logs = logs.slice(-limit);
+
+  if (format === 'json') {
+    res.json({
+      count: logs.length,
+      logs: logs
+    });
+  } else {
+    // Plain text format for easy reading
+    const text = logs.map(l =>
+      `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}`
+    ).join('\n');
+
+    res.type('text/plain').send(text || 'No logs yet');
+  }
+});
+
+// Clear logs endpoint
+app.post('/logs/clear', (req, res) => {
+  logBuffer.length = 0;
+  res.json({ success: true, message: 'Logs cleared' });
 });
 
 // Twilio voice webhook endpoint
